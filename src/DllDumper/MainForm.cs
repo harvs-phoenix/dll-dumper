@@ -46,6 +46,7 @@ public sealed class MainForm : Form
     private Label _cardDllTitle = null!, _cardDllBody = null!;
     private Label _cardMemTitle = null!, _cardMemBody = null!;
     private Label _cardMonoTitle = null!, _cardMonoBody = null!;
+    private Label _cardDllRec = null!, _cardMemRec = null!, _cardMonoRec = null!;
     private ComboBox _simpleModeBox = null!, _recoverBox = null!;
     private TextBox _simplePayloadBox = null!;
     private Button _simpleBrowseBtn = null!, _simpleInjectBtn = null!, _recoverBtn = null!;
@@ -87,6 +88,8 @@ public sealed class MainForm : Form
     private bool _capturing, _injecting, _refreshing, _suppressProcSelect;
     private bool _syncing, _recovering, _showSimple = true;
     private readonly Dictionary<string, InjectItem> _lastByMode = new();
+    private readonly HashSet<InjectItem> _autoRecovered = new();
+    private Task<List<ModuleInfo>>? _baselineTask;   // image map snapshot taken at Record start
     private List<(string Name, int Pid, string Title, long Ws)> _processes = new();
     private int _version, _searchVersion;
     private bool _haveBaseline;
@@ -490,13 +493,16 @@ public sealed class MainForm : Form
         // --- "has anything been injected?" cards ---
         _cardDllTitle = CardTitle("DLL");
         _cardDllBody = CardBody();
-        var dllCard = MakeCard(_cardDllTitle, _cardDllBody);
+        _cardDllRec = CardRecLine();
+        var dllCard = MakeCard(_cardDllTitle, _cardDllBody, _cardDllRec);
         _cardMemTitle = CardTitle("MEMORY");
         _cardMemBody = CardBody();
-        var memCard = MakeCard(_cardMemTitle, _cardMemBody);
+        _cardMemRec = CardRecLine();
+        var memCard = MakeCard(_cardMemTitle, _cardMemBody, _cardMemRec);
         _cardMonoTitle = CardTitle("MONO ★", accent: true);
         _cardMonoBody = CardBody("— no mono injection yet —\npick a managed dll below, hit Inject ▶");
-        var monoCard = MakeCard(_cardMonoTitle, _cardMonoBody);
+        _cardMonoRec = CardRecLine();
+        var monoCard = MakeCard(_cardMonoTitle, _cardMonoBody, _cardMonoRec);
 
         var cards = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
         cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31));
@@ -603,7 +609,18 @@ public sealed class MainForm : Form
         Text = placeholder,
     };
 
-    private Panel MakeCard(Label title, Label body)
+    private static Label CardRecLine() => new()
+    {
+        Dock = DockStyle.Bottom,
+        Height = 18,
+        Font = FSub,
+        ForeColor = CDim,
+        TextAlign = ContentAlignment.MiddleLeft,
+        AutoEllipsis = true,
+        Text = "",
+    };
+
+    private Panel MakeCard(Label title, Label body, Label? recLine = null)
     {
         var card = new Panel
         {
@@ -614,6 +631,7 @@ public sealed class MainForm : Form
         };
         card.Controls.Add(body);
         card.Controls.Add(title);
+        if (recLine is not null) card.Controls.Add(recLine);
         card.Paint += (_, e) =>
         {
             using var pen = new Pen(CLine);
@@ -771,6 +789,148 @@ public sealed class MainForm : Form
         long bytes = new FileInfo(outPath).Length;
         SetSimpleStatus($"✓ recovered {sel} → {Path.GetFileName(outPath)} ({MemoryRegion.FormatSize(bytes)})");
         SetStatus($"recovered {sel} → {outPath} · {summary}");
+    }
+
+    // =========================================================================
+    // auto-recover on stop: diff the target's mapped images against the
+    // baseline taken when Record started — every image that appeared during the
+    // session (injected by this app OR by any external tool) is dumped back
+    // out and the result is reported on the cards and in the status line
+    // =========================================================================
+    private async Task<List<string>> RecoverSessionAsync()
+    {
+        var done = new List<string>();
+        if (_proc is null) return done;
+
+        var proc = _proc;
+        int version = _version;
+        string dir = PickRecoveryDir();
+
+        List<ModuleInfo>? baseline = null;
+        if (_baselineTask is not null)
+        {
+            try { baseline = await _baselineTask; }
+            catch { /* no baseline available — tracked-injection recovery below still runs */ }
+        }
+
+        var scan = await Task.Run(() => ModuleDumper.ScanImages(proc.Handle));
+        if (version != _version) return done;
+
+        // everything mapped during the session that wasn't there when Record started
+        var known = baseline is null
+            ? new HashSet<long>()
+            : new HashSet<long>(baseline.Select(i => i.Base.ToInt64()));
+        var newImages = scan
+            .Where(i => !known.Contains(i.Base.ToInt64()))
+            .OrderBy(i => i.Base.ToInt64())
+            .ToList();
+
+        var recovered = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // file -> size text
+
+        foreach (var img in newImages)
+        {
+            try
+            {
+                string outPath = UniquePath(Path.Combine(dir, Path.GetFileNameWithoutExtension(img.Name) + ".dll"));
+                string detail = await Task.Run(() => ModuleDumper.Dump(proc.Handle, img, outPath));
+                recovered[img.Name] = MemoryRegion.FormatSize(img.Size);
+                _rec.Add("Recover", img.Name, $"new during session · {detail} → {outPath}");
+                done.Add($"✓ recovered {img.Name} ({MemoryRegion.FormatSize(img.Size)})");
+            }
+            catch (Exception ex)
+            {
+                _rec.RecordError("recover", img.Name + ": " + ex.Message);
+                done.Add($"✗ could not recover {img.Name} — {ex.Message}");
+            }
+            if (version != _version) return done;
+        }
+
+        // app-tracked injections the scan missed; memory-mode is shellcode, so the
+        // payload dll is legitimately not mapped — skip it rather than fail noise
+        foreach (var inj in _rec.Injections.Where(i => i.Status == "Success" && !_autoRecovered.Contains(i)))
+        {
+            _autoRecovered.Add(inj);
+            string file = Path.GetFileName(inj.Payload);
+            if (recovered.ContainsKey(file)) continue;   // already dumped by the scan
+            if (inj.Mode == "Memory") continue;
+
+            try
+            {
+                var img = await Task.Run(() => ModuleDumper.FindImage(proc.Handle, file, scan));
+                if (img is null)
+                {
+                    _rec.Add("Recover", file, $"{inj.Mode} injection · FAILED · not found in the target's memory");
+                    done.Add($"✗ could not recover {file} — not found in the target's memory");
+                    continue;
+                }
+                string outPath = UniquePath(Path.Combine(dir, Path.GetFileNameWithoutExtension(file) + ".dll"));
+                string detail = await Task.Run(() => ModuleDumper.Dump(proc.Handle, img, outPath));
+                recovered[file] = MemoryRegion.FormatSize(img.Size);
+                _rec.Add("Recover", file, $"{inj.Mode} injection · auto-recovered · {detail} · {outPath}");
+                done.Add($"✓ recovered {file} ({MemoryRegion.FormatSize(img.Size)})");
+            }
+            catch (Exception ex)
+            {
+                _rec.RecordError("recover", ex.Message);
+                done.Add($"✗ could not recover {file} — {ex.Message}");
+            }
+        }
+
+        // per-card recover lines for whatever this app injected
+        foreach (var kv in _lastByMode)
+        {
+            string file = Path.GetFileName(kv.Value.Payload);
+            if (recovered.TryGetValue(file, out var size))
+                SetCardRec(kv.Key, true, $"↻ recovered · {size}");
+            else if (kv.Value.Status == "Success" && kv.Value.Mode != "Memory")
+                SetCardRec(kv.Key, false, "↻ recover failed · not found in memory");
+        }
+
+        _baselineTask = null;
+        return done;
+    }
+
+    private void SetCardRec(string mode, bool ok, string text)
+    {
+        var lbl = mode switch
+        {
+            "DLL" => _cardDllRec,
+            "Memory" => _cardMemRec,
+            _ => _cardMonoRec,
+        };
+        lbl.Text = text;
+        lbl.ForeColor = ok ? COk : Color.FromArgb(235, 95, 100);
+    }
+
+    private static string PickRecoveryDir()
+    {
+        string next = Path.Combine(AppContext.BaseDirectory, "recovered");
+        try
+        {
+            Directory.CreateDirectory(next);
+            return next;
+        }
+        catch
+        {
+            // e.g. installed under Program Files — fall back to the desktop
+            string desk = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "dll-dumper");
+            Directory.CreateDirectory(desk);
+            return desk;
+        }
+    }
+
+    private static string UniquePath(string path)
+    {
+        if (!File.Exists(path)) return path;
+        string dir = Path.GetDirectoryName(path)!;
+        string name = Path.GetFileNameWithoutExtension(path);
+        string ext = Path.GetExtension(path);
+        for (int i = 1; ; i++)
+        {
+            string candidate = Path.Combine(dir, $"{name}_{i}{ext}");
+            if (!File.Exists(candidate)) return candidate;
+        }
     }
 
     /// <summary>Finds a static entry point inside a managed payload so mono mode "just works".</summary>
@@ -1222,7 +1382,11 @@ public sealed class MainForm : Form
         _injTotal = 0;
         _injOk = 0;
         _lastByMode.Clear();
+        _baselineTask = null;
         UpdateInjectCards();
+        _cardDllRec.Text = ""; _cardDllRec.ForeColor = CDim;
+        _cardMemRec.Text = ""; _cardMemRec.ForeColor = CDim;
+        _cardMonoRec.Text = ""; _cardMonoRec.ForeColor = CDim;
 
         _monoList.Items.Clear();
         _memList.Items.Clear();
@@ -1546,6 +1710,8 @@ public sealed class MainForm : Form
         try
         {
             _rec.StartSession();
+            _baselineTask = Task.Run(() => ModuleDumper.ScanImages(_proc.Handle)); // "before" image map for stop-recovery
+            _cardDllRec.Text = ""; _cardMemRec.Text = ""; _cardMonoRec.Text = "";
             UpdateRecordUi();
             UpdateButtons();
             SetSimpleStatus($"capturing {_proc.Name} — mono, memory and files…");
@@ -1585,14 +1751,29 @@ public sealed class MainForm : Form
         string msg = _rec.StopSession(summary);
         UpdateButtons();
         UpdateRecordUi();
-        SetSimpleStatus($"{msg} · {_rec.Items.Count:N0} items — open Advanced ▸ Recorded to inspect");
-        SetStatus($"{msg}. {_rec.Items.Count:N0} recorded items — see the Recorded tab (Save report exports it).");
+
+        // the whole point: diff the image map against the record-time baseline,
+        // dump whatever dll appeared during the session (our inject or an
+        // external one) and report whether it could be recovered
+        var recovered = await RecoverSessionAsync();
+
+        bool anyFail = recovered.Any(r => r.StartsWith("✗"));
+        var shown = recovered.Count > 4 ? recovered.Take(4).ToList() : recovered;
+        string tail = recovered.Count > 0
+            ? "  ·  " + string.Join("  ·  ", shown) +
+              (recovered.Count > 4 ? $"  ·  +{recovered.Count - 4} more" : "")
+            : "";
+        SetSimpleStatus($"{msg} · {_rec.Items.Count:N0} items{tail}", !anyFail);
+        SetStatus($"{msg}. {_rec.Items.Count:N0} recorded items{tail}" +
+                  (recovered.Count > 0 ? "" : " — see the Recorded tab (Save report exports it)."),
+                  anyFail);
     }
 
     private void StopRecordingInternal(string reason)
     {
         if (!_rec.IsRecording) return;
         _tickTimer.Stop();
+        _baselineTask = null;
         _rec.StopSession($"{reason} · {_rec.Items.Count:N0} entries · {_rec.Injections.Count} injections");
         UpdateButtons();
         UpdateRecordUi();
@@ -1808,6 +1989,7 @@ public sealed class MainForm : Form
 
         _rec.RecordInjection(item);
         _lastByMode[mode] = item;
+        SetCardRec(mode, true, "");   // fresh injection — recovery verdict comes at Stop
         UpdateInjectCards();
         _injDetail.Text = string.Join(Environment.NewLine, item.Steps);
         UpdateRecordUi();

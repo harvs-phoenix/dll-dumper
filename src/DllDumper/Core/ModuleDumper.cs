@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace DllDumper.Core;
@@ -88,5 +89,80 @@ public static class ModuleDumper
         File.WriteAllBytes(outPath, image);
         return $"{sections.Count} sections · {MemoryRegion.FormatSize(fileLen)}" +
                (skipped > 0 ? $" · {MemoryRegion.FormatSize(skipped)} unreadable (zero-filled)" : "");
+    }
+
+    /// <summary>
+    /// Finds a file's image inside the target. Checks the native module list first,
+    /// then falls back to the mapped-image scan (mono maps assemblies as MEM_IMAGE
+    /// without always registering a native module).
+    /// </summary>
+    public static ModuleInfo? FindImage(IntPtr hProcess, string fileName, List<ModuleInfo> modules)
+    {
+        foreach (var m in modules)
+            if (m.Name.Equals(fileName, StringComparison.OrdinalIgnoreCase) && m.Size > 0)
+                return m;
+
+        return ScanImages(hProcess)
+            .FirstOrDefault(i => i.Name.Equals(fileName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Snapshots every mapped image in the target (allocation base, file name, device
+    /// path, image span). Diffing this before Record and after Stop surfaces dlls that
+    /// appeared from ANY source — this app's injectors or an external tool's.
+    /// </summary>
+    public static List<ModuleInfo> ScanImages(IntPtr hProcess)
+    {
+        int mbiSize = Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
+        long addr = 0;
+        var sb = new StringBuilder(512);
+        var byBase = new Dictionary<long, ModuleInfo>();
+
+        while (addr >= 0)
+        {
+            if (Native.VirtualQueryEx(hProcess, (IntPtr)addr, out var mbi, (nuint)mbiSize) == 0)
+                break;
+            long baseAddr = mbi.BaseAddress.ToInt64();
+            long size = mbi.RegionSize.ToInt64();
+            if (size <= 0) break;
+
+            if (mbi.State == Native.MEM_COMMIT && mbi.Type == Native.MEM_IMAGE)
+            {
+                long alloc = mbi.AllocationBase.ToInt64();
+                long end = baseAddr + size;
+
+                if (byBase.TryGetValue(alloc, out var img))
+                {
+                    // same image, later region — grow the span
+                    if (end - alloc > img.Size)
+                        img.Size = (int)Math.Min(int.MaxValue, end - alloc);
+                }
+                else
+                {
+                    sb.Clear();
+                    string full = "";
+                    string name = $"image_0x{alloc:X}";
+                    if (Native.K32GetMappedFileNameW(hProcess, mbi.BaseAddress, sb, (uint)sb.Capacity) > 0)
+                    {
+                        full = sb.ToString();
+                        int cut = full.LastIndexOf('\\');
+                        name = cut >= 0 ? full[(cut + 1)..] : full;
+                    }
+                    byBase[alloc] = new ModuleInfo
+                    {
+                        Name = name,
+                        Path = full,
+                        Base = mbi.AllocationBase,
+                        Size = (int)Math.Min(int.MaxValue, end - alloc),
+                    };
+                }
+            }
+
+            long next = baseAddr + size;
+            if (next <= addr) break;
+            addr = next;
+        }
+
+        return byBase.Values.ToList();
     }
 }

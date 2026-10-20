@@ -6,8 +6,9 @@
 whole picture: the Mono runtime (or CoreCLR), every managed assembly, every export, the full
 memory map, and every file the process has loaded. Then it pushes back — inject a native `.dll`,
 write shellcode into the target, or fire a C# entry point straight through the Mono runtime.
-And when you need the file itself: **Recover** reads any loaded module — including a dll you
-just injected — straight back out of the target's memory and saves it to disk.
+And when you need the file itself: **stopping a recording automatically pulls every dll that
+appeared during it back out of the target's memory** — injected by this app *or by your own
+external injector* — and tells you whether it could be recovered.
 
 No NuGet packages. No installer. One `.exe`.
 
@@ -17,15 +18,23 @@ No NuGet packages. No installer. One `.exe`.
 
 ## the simple view (default)
 
+The intended flow — record, mod, stop, and it tells you if the dll came back:
+
 1. pick a process on the left
 2. hit the big **● RECORD** button — it flips to **■ STOP · 00:06** and counts up live
-3. three cards answer the only question that matters — **DLL / MEMORY / MONO ★**:
+3. inject while it records: this app's **Inject ▶** row, or **your own external injector** —
+   either way, a snapshot of the target's mapped images was taken when recording started
+4. hit **■ STOP** — the image map is diffed against that snapshot and every dll that appeared
+   during the session is dumped to the `recovered\` folder next to the exe, with the verdict
+   right in the status line:
+   `Recorded for 00:08 · 246 items · ✓ recovered MyMod.dll (96 KB)`
+   or `✗ could not recover MyMod.dll — not found in the target's memory`
+5. the three cards answer the only question that matters — **DLL / MEMORY / MONO ★**:
    `— nothing injected yet —` until something lands, then green
-   `✓ TestPayload.dll → TestTarget (PID 1234)` (or red `✗` with the reason to chase in the log)
-4. the inject row: mode + payload + **Inject ▶** — mono mode doesn't even need an entry point
-   typed, it auto-picks one out of the payload (e.g. `TestPayload.Loader.Load()`)
-5. the recover row: pick any loaded module → **Recover ▶** → dumped to a file.
-   A dll you just injected shows up in the list automatically.
+   `✓ TestPayload.dll → TestTarget (PID 1234)` (or red `✗` with the reason to chase in the log),
+   and after Stop each card also shows `↻ recovered · 96 KB` (or red `↻ recover failed`)
+6. the recover row is the manual escape hatch: pick any loaded module → **Recover ▶** → dumped
+   to a file you choose. A dll you just injected shows up in the list automatically.
 
 **Advanced ▸** (top-right) opens the full inspector: mono exports & assemblies, memory map,
 mapped files, the recorded session log and the injection ledger.
@@ -34,13 +43,14 @@ mapped files, the recorded session log and the injection ledger.
 
 | | |
 |---|---|
-| **simple by default** | record → stop → the DLL / MEMORY / MONO cards tell you exactly what got injected |
+| **simple by default** | record → inject (ours or yours) → stop → the status line says if the dll could be recovered |
 | **process picker** | live list of every running process (name, PID, window title, memory), filterable |
 | **mono inspector** | auto-detects **Mono** *and* **CoreCLR** runtimes, dumps `mono_*` exports, every loaded assembly with type + method counts |
 | **memory map** | full `VirtualQueryEx` walk — base, size, state, protect, type, owning module |
 | **loaded files** | every module in the target with base address and on-disk size |
 | **recorder** | click **● Record** and everything above streams into a timestamped log; **Save report** exports it |
 | **3 injectors** | `.dll` loader, memory/shellcode, and Mono runtime invoke — each with a step-by-step log |
+| **recover on stop** | stopping a recording diffs the target's image map and auto-dumps every new dll (yours *or* any external injector's) to `recovered\` |
 | **recover a dll** | dump any loaded module (patched, unpacked, or injected) straight out of the target's memory to disk |
 | **injection ledger** | every injection is listed with mode, payload, and result (Success / Fail + why) |
 | **single file** | self-contained x64 exe, zero dependencies, .NET 10 |
@@ -70,6 +80,18 @@ module handle — so when something fails you know exactly where.
 
 ## recover a dll
 
+### automatic — on stop
+
+When you hit **■ STOP**, the target's mapped-image map is diffed against the snapshot taken at
+record start. Every image that appeared during the session — whether it landed through this
+app's injectors or **through your own injector, which the app never sees** — is read out of
+memory and written to a `recovered\` folder next to the exe (or your desktop if the install
+folder isn't writable). The status line reports each one: `✓ recovered MyMod.dll (96 KB)` or
+`✗ could not recover …` with the reason. Mono-mapped assemblies are found through the memory
+map even when they never appear in the native module list.
+
+### manual — any module
+
 Pick a module in the **recover** dropdown (a dll you just injected lands there automatically)
 and hit **Recover ▶**. The module is read page-by-page out of the target's memory — guarded
 pages become zeros instead of killing the dump — and rebuilt as a PE file on disk: headers
@@ -90,9 +112,9 @@ DllDumper.exe TestTarget Recorded
 ```
 
 1. pick the target in the left list
-2. hit the big **● RECORD**, let it run, hit **■ STOP** — the cards now answer "did anything land?"
-3. browse to your payload, pick a mode, hit **Inject ▶** — mono mode auto-picks the entry point
-4. need the file itself? pick it in **recover** → **Recover ▶** → dumped to disk
+2. hit the big **● RECORD**, let it run
+3. inject — this app (**Inject ▶**, mono mode auto-picks the entry point) or your own injector
+4. hit **■ STOP** — the status line reports whether the dll was recovered to `recovered\`
 5. **Advanced ▸** holds the full detail: **Mono / Memory / Files / Recorded / Injected** tabs
 
 ### samples
@@ -113,8 +135,11 @@ DllDumper.exe TestTarget
    plus every `Assembly-CSharp` / plugin assembly with live type & method counts
 4. **● Record** before you mod — you now have a full baseline of the game's state
 5. inject your loader `.dll` (mode 1) or a managed entry point (mode 3) — the ★ **MONO** card
-   tells you whether the managed side landed
-6. recover any module back out of memory whenever you need the file
+   tells you whether the managed side landed. Using your own injector? That works too — the
+   record-time baseline makes any new mapping visible regardless of how it got there
+6. **■ STOP** — the dll that appeared during the session is pulled back out of the game's
+   memory into `recovered\`, and the status line tells you if it worked
+7. need a specific module on your own terms? the manual **recover** row dumps anything mapped
 
 > IL2CPP builds have no embedded Mono runtime — those will show the file/module list only.
 > That's still useful: you can see every mapped file and the memory layout.
