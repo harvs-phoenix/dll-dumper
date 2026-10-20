@@ -50,7 +50,7 @@ mapped files, the recorded session log and the injection ledger.
 | **loaded files** | every module in the target with base address and on-disk size |
 | **recorder** | click **● Record** and everything above streams into a timestamped log; **Save report** exports it |
 | **3 injectors** | `.dll` loader, memory/shellcode, and Mono runtime invoke — each with a step-by-step log |
-| **recover on stop** | stopping a recording diffs the target's image map and auto-dumps every new dll (yours *or* any external injector's) to `recovered\` |
+| **one session folder per recording** | Stop writes a neat timestamped folder — `report.txt` (log + injections + recover verdicts), `mono.txt`, `memory.txt`, `files.txt` and the `recovered\` dlls — zip it and send it as-is |
 | **recover a dll** | dump any loaded module (patched, unpacked, or injected) straight out of the target's memory to disk |
 | **injection ledger** | every injection is listed with mode, payload, and result (Success / Fail + why) |
 | **single file** | self-contained x64 exe, zero dependencies, .NET 10 |
@@ -85,8 +85,8 @@ module handle — so when something fails you know exactly where.
 When you hit **■ STOP**, the target's mapped-image map is diffed against the snapshot taken at
 record start. Every image that appeared during the session — whether it landed through this
 app's injectors or **through your own injector, which the app never sees** — is read out of
-memory and written to a `recovered\` folder next to the exe (or your desktop if the install
-folder isn't writable). The status line reports each one: `✓ recovered MyMod.dll (96 KB)` or
+memory and written to the session's `recovered\` subfolder, alongside the exported logs and
+data. The status line reports each one: `✓ recovered MyMod.dll (96 KB)` or
 `✗ could not recover …` with the reason. Mono-mapped assemblies are found through the memory
 map even when they never appear in the native module list.
 
@@ -114,7 +114,11 @@ DllDumper.exe TestTarget Recorded
 1. pick the target in the left list
 2. hit the big **● RECORD**, let it run
 3. inject — this app (**Inject ▶**, mono mode auto-picks the entry point) or your own injector
-4. hit **■ STOP** — the status line reports whether the dll was recovered to `recovered\`
+4. hit **■ STOP** — the status line reports whether the dll was recovered, and everything lands
+   in one neat folder: `sessions\2026-10-20_152016_YourGame\` containing `report.txt` (full log,
+   injections, recover verdicts), `mono.txt`, `memory.txt`, `files.txt` and `recovered\*.dll`.
+   Zip that folder and send it to whoever is helping you — **Open folder** (next to Recover)
+   jumps straight to it
 5. **Advanced ▸** holds the full detail: **Mono / Memory / Files / Recorded / Injected** tabs
 
 ### samples

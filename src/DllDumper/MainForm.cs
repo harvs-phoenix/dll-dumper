@@ -49,7 +49,8 @@ public sealed class MainForm : Form
     private Label _cardDllRec = null!, _cardMemRec = null!, _cardMonoRec = null!;
     private ComboBox _simpleModeBox = null!, _recoverBox = null!;
     private TextBox _simplePayloadBox = null!;
-    private Button _simpleBrowseBtn = null!, _simpleInjectBtn = null!, _recoverBtn = null!;
+    private Button _simpleBrowseBtn = null!, _simpleInjectBtn = null!, _recoverBtn = null!, _openFolderBtn = null!;
+    private string? _lastSessionDir;   // most recent exported session folder
 
     // advanced view -------------------------------------------------------------
     private ComboBox _modeBox = null!;
@@ -312,6 +313,7 @@ public sealed class MainForm : Form
         _injectBtn.Click += async (_, _) => await InjectAsync();
         _simpleInjectBtn.Click += async (_, _) => await InjectAsync();
         _recoverBtn.Click += async (_, _) => await RecoverModuleAsync();
+        _openFolderBtn.Click += (_, _) => OpenSessionFolder();
         void OpenInjected() { ShowView(false); SelectTabByName("Injected"); }
         _cardDllTitle.Click += (_, _) => OpenInjected(); _cardDllBody.Click += (_, _) => OpenInjected();
         _cardMemTitle.Click += (_, _) => OpenInjected(); _cardMemBody.Click += (_, _) => OpenInjected();
@@ -344,6 +346,7 @@ public sealed class MainForm : Form
         _tip.SetToolTip(_simpleInjectBtn, "Inject the payload into the selected process (drag & drop a file onto this window to set it)");
         _tip.SetToolTip(_recoverBtn, "Read the module straight out of the target's memory and save it to disk");
         _tip.SetToolTip(_recoverBox, "Modules loaded in the target — a dll you just injected shows up here");
+        _tip.SetToolTip(_openFolderBtn, "Open the last session folder — logs, mono/memory/files data and recovered dlls, ready to send");
         _tip.SetToolTip(_advToggleBtn, "Switch between this simple view and the advanced tabs");
         _tip.SetToolTip(_cardMonoBody, "mono injection results — click to open the Injected tab");
 
@@ -487,7 +490,7 @@ public sealed class MainForm : Form
             TextAlign = ContentAlignment.MiddleLeft,
             AutoEllipsis = true,
             Padding = new Padding(2, 0, 0, 0),
-            Text = "pick a process on the left, then hit RECORD",
+            Text = "1 select a process on the left  ·  2 click RECORD  ·  3 inject (yours or ours)  ·  4 click STOP — logs, data and recovered dlls land in one folder",
         };
 
         // --- "has anything been injected?" cards ---
@@ -560,13 +563,16 @@ public sealed class MainForm : Form
             Margin = Padding.Empty,
         };
         _recoverBtn = MakeButton("Recover ▶");
+        _openFolderBtn = MakeButton("Open folder");
         var recoverRow = RowPanel(
             new ColumnStyle(SizeType.Absolute, 118),
             new ColumnStyle(SizeType.Percent, 100),
+            new ColumnStyle(SizeType.Absolute, 100),
             new ColumnStyle(SizeType.Absolute, 130));
         recoverRow.Controls.Add(recoverLabel, 0, 0);
         recoverRow.Controls.Add(_recoverBox, 1, 0);
-        recoverRow.Controls.Add(_recoverBtn, 2, 0);
+        recoverRow.Controls.Add(_openFolderBtn, 2, 0);
+        recoverRow.Controls.Add(_recoverBtn, 3, 0);
 
         var p = new TableLayoutPanel
         {
@@ -797,14 +803,14 @@ public sealed class MainForm : Form
     // session (injected by this app OR by any external tool) is dumped back
     // out and the result is reported on the cards and in the status line
     // =========================================================================
-    private async Task<List<string>> RecoverSessionAsync()
+    private async Task<List<string>> RecoverSessionAsync(string dir)
     {
         var done = new List<string>();
         if (_proc is null) return done;
 
         var proc = _proc;
         int version = _version;
-        string dir = PickRecoveryDir();
+        Directory.CreateDirectory(dir);
 
         List<ModuleInfo>? baseline = null;
         if (_baselineTask is not null)
@@ -900,24 +906,6 @@ public sealed class MainForm : Form
         };
         lbl.Text = text;
         lbl.ForeColor = ok ? COk : Color.FromArgb(235, 95, 100);
-    }
-
-    private static string PickRecoveryDir()
-    {
-        string next = Path.Combine(AppContext.BaseDirectory, "recovered");
-        try
-        {
-            Directory.CreateDirectory(next);
-            return next;
-        }
-        catch
-        {
-            // e.g. installed under Program Files — fall back to the desktop
-            string desk = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "dll-dumper");
-            Directory.CreateDirectory(desk);
-            return desk;
-        }
     }
 
     private static string UniquePath(string path)
@@ -1737,6 +1725,8 @@ public sealed class MainForm : Form
     private async Task StopAsync()
     {
         if (!_rec.IsRecording) return;
+        var proc = _proc;
+        if (proc is null) return;
         SetStatus("finishing final capture…");
         await RunCaptureAsync();
 
@@ -1747,15 +1737,41 @@ public sealed class MainForm : Form
             $"({types:N0} types / {methods:N0} methods) · {_rec.Injections.Count} injections · " +
             $"{_rec.Items.Count:N0} log entries";
 
+        var startedAt = _rec.StartedAt;
+        var stoppedAt = DateTime.Now;
         _tickTimer.Stop();
         string msg = _rec.StopSession(summary);
         UpdateButtons();
         UpdateRecordUi();
 
-        // the whole point: diff the image map against the record-time baseline,
-        // dump whatever dll appeared during the session (our inject or an
-        // external one) and report whether it could be recovered
-        var recovered = await RecoverSessionAsync();
+        // one neat, send-able folder per session: recovered dlls + logs + all data
+        string folder = "";
+        var recovered = new List<string>();
+        try
+        {
+            folder = SessionExporter.CreateSessionFolder(proc.Name);
+
+            // diff the image map against the record-time baseline, dump whatever
+            // dll appeared (our inject or an external one) into the session folder
+            recovered = await RecoverSessionAsync(Path.Combine(folder, "recovered"));
+
+            var snapModules = _modules;
+            var snapRegions = _regions;
+            var snapAsm = _assemblies;
+            var snapRuntime = _runtime;
+            var snapRec = _rec;
+            var snapProc = proc;
+            string f = folder;
+            await Task.Run(() => SessionExporter.Write(
+                f, snapProc.Name, snapProc.Pid, snapProc.Is64Bit,
+                startedAt, stoppedAt, summary,
+                snapRec, snapRuntime, snapAsm, snapRegions, snapModules, recovered));
+            _lastSessionDir = folder;
+        }
+        catch (Exception ex)
+        {
+            _rec.RecordError("export", ex.Message);
+        }
 
         bool anyFail = recovered.Any(r => r.StartsWith("✗"));
         var shown = recovered.Count > 4 ? recovered.Take(4).ToList() : recovered;
@@ -1763,10 +1779,31 @@ public sealed class MainForm : Form
             ? "  ·  " + string.Join("  ·  ", shown) +
               (recovered.Count > 4 ? $"  ·  +{recovered.Count - 4} more" : "")
             : "";
-        SetSimpleStatus($"{msg} · {_rec.Items.Count:N0} items{tail}", !anyFail);
-        SetStatus($"{msg}. {_rec.Items.Count:N0} recorded items{tail}" +
-                  (recovered.Count > 0 ? "" : " — see the Recorded tab (Save report exports it)."),
-                  anyFail);
+        string where = folder != "" ? $"  ·  session → {RelToExe(folder)}" : "";
+        SetSimpleStatus($"{msg} · {_rec.Items.Count:N0} items{tail}{where}", !anyFail);
+        SetStatus($"{msg}. {_rec.Items.Count:N0} recorded items{tail}{where}", anyFail);
+    }
+
+    private static string RelToExe(string folder)
+    {
+        try { return Path.GetRelativePath(AppContext.BaseDirectory, folder); }
+        catch { return folder; }
+    }
+
+    private void OpenSessionFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(SessionExporter.Root);
+            string dir = _lastSessionDir is not null && Directory.Exists(_lastSessionDir)
+                ? _lastSessionDir
+                : SessionExporter.Root;
+            Process.Start(new ProcessStartInfo("explorer.exe", dir) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            SetSimpleStatus($"could not open the folder: {ex.Message}", false);
+        }
     }
 
     private void StopRecordingInternal(string reason)
@@ -1774,9 +1811,40 @@ public sealed class MainForm : Form
         if (!_rec.IsRecording) return;
         _tickTimer.Stop();
         _baselineTask = null;
-        _rec.StopSession($"{reason} · {_rec.Items.Count:N0} entries · {_rec.Injections.Count} injections");
+        var startedAt = _rec.StartedAt;
+        var stoppedAt = DateTime.Now;
+        string summary = $"{reason} · {_rec.Items.Count:N0} entries · {_rec.Injections.Count} injections";
+        _rec.StopSession(summary);
         UpdateButtons();
         UpdateRecordUi();
+
+        // switched process mid-recording — still save what was captured
+        if (_proc is null) return;
+        try
+        {
+            string folder = SessionExporter.CreateSessionFolder(_proc.Name);
+            _lastSessionDir = folder;
+            var snapModules = _modules;
+            var snapRegions = _regions;
+            var snapAsm = _assemblies;
+            var snapRuntime = _runtime;
+            var snapRec = _rec;
+            var snapProc = _proc;
+            string f = folder;
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    SessionExporter.Write(
+                        f, snapProc.Name, snapProc.Pid, snapProc.Is64Bit,
+                        startedAt, stoppedAt, summary,
+                        snapRec, snapRuntime, snapAsm, snapRegions, snapModules,
+                        Array.Empty<string>());
+                }
+                catch { /* never crash the UI over a background export */ }
+            });
+        }
+        catch { /* folder creation failed — nothing to do */ }
     }
 
     private void OnRecordAdded(RecordItem item)
