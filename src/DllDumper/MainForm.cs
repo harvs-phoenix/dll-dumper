@@ -34,11 +34,23 @@ public sealed class MainForm : Form
     // controls
     // =========================================================================
     private Label _titleLabel = null!, _subLabel = null!, _recLabel = null!;
-    private Button _recordBtn = null!, _stopBtn = null!, _refreshBtn = null!;
+    private Button _bigRecordBtn = null!, _refreshBtn = null!, _advToggleBtn = null!;
     private TextBox _filterBox = null!;
     private ListView _procList = null!;
     private Label _targetLabel = null!;
 
+    // simple view --------------------------------------------------------------
+    private Panel _viewHost = null!, _advPanel = null!;
+    private TableLayoutPanel _simplePanel = null!;
+    private Label _simpleStatus = null!;
+    private Label _cardDllTitle = null!, _cardDllBody = null!;
+    private Label _cardMemTitle = null!, _cardMemBody = null!;
+    private Label _cardMonoTitle = null!, _cardMonoBody = null!;
+    private ComboBox _simpleModeBox = null!, _recoverBox = null!;
+    private TextBox _simplePayloadBox = null!;
+    private Button _simpleBrowseBtn = null!, _simpleInjectBtn = null!, _recoverBtn = null!;
+
+    // advanced view -------------------------------------------------------------
     private ComboBox _modeBox = null!;
     private TextBox _payloadBox = null!, _nsBox = null!, _clsBox = null!;
     private TextBox _methodBox = null!, _paramBox = null!;
@@ -73,10 +85,12 @@ public sealed class MainForm : Form
     private System.Windows.Forms.Timer _blinkTimer = null!;
 
     private bool _capturing, _injecting, _refreshing, _suppressProcSelect;
+    private bool _syncing, _recovering, _showSimple = true;
+    private readonly Dictionary<string, InjectItem> _lastByMode = new();
     private List<(string Name, int Pid, string Title, long Ws)> _processes = new();
     private int _version, _searchVersion;
     private bool _haveBaseline;
-    private int _lastFiles = -1, _lastRegions = -1;
+    private int _lastFiles = -1, _lastRegions = -1, _lastRecoverCount = -1;
     private int _injTotal, _injOk;
     private readonly string[] _startupArgs;
 
@@ -111,9 +125,18 @@ public sealed class MainForm : Form
         _blinkTimer.Tick += (_, _) =>
         {
             if (_rec.IsRecording)
+            {
                 _recLabel.ForeColor = _recLabel.ForeColor == CRed ? CRedDark : CRed;
+                _bigRecordBtn.Text = $"■   S T O P   ·   {_rec.Elapsed:mm\\:ss}";
+                _simpleStatus.ForeColor = CRed;
+                _simpleStatus.Text =
+                    $"● recording {_proc?.Name} · {_rec.Elapsed:hh\\:mm\\:ss} · " +
+                    $"{_rec.Items.Count:N0} items · {_rec.Injections.Count} injections";
+            }
             else
+            {
                 _recLabel.ForeColor = CDim;
+            }
         };
         _blinkTimer.Start();
 
@@ -183,19 +206,15 @@ public sealed class MainForm : Form
             TextAlign = ContentAlignment.MiddleRight,
             Margin = new Padding(0, 6, 12, 0),
         };
-        _recordBtn = AccentButton("● Record");
-        _stopBtn = MakeButton("■ Stop");
-        _recordBtn.Margin = new Padding(0, 2, 6, 2);
-        _stopBtn.Margin = new Padding(0, 2, 0, 2);
+        _advToggleBtn = MakeButton("Advanced ▸");
+        _advToggleBtn.Margin = new Padding(0, 2, 0, 2);
 
-        var rightTable = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
-        rightTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var rightTable = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
         rightTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         rightTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         rightTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         rightTable.Controls.Add(_recLabel, 0, 0);
-        rightTable.Controls.Add(_recordBtn, 1, 0);
-        rightTable.Controls.Add(_stopBtn, 2, 0);
+        rightTable.Controls.Add(_advToggleBtn, 1, 0);
 
         var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(14, 6, 14, 4) };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -252,20 +271,18 @@ public sealed class MainForm : Form
         left.Controls.Add(_procList, 0, 1);
         left.Controls.Add(_targetLabel, 0, 2);
 
-        // ---------- right: injection panel + tabs ----------
-        var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(6, 8, 10, 8) };
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 116));
-        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        right.Controls.Add(BuildInjectPanel(), 0, 0);
-        BuildTabs();
-        right.Controls.Add(_tabs, 0, 1);
+        // ---------- right: simple view (default) or advanced view ----------
+        _viewHost = new Panel { Dock = DockStyle.Fill, BackColor = CPanel, Margin = Padding.Empty, Padding = Padding.Empty };
+        BuildAdvancedPanel();
+        BuildSimplePanel();
+        ShowView(simple: true);
 
         var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 310));
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         body.Controls.Add(left, 0, 0);
-        body.Controls.Add(right, 1, 0);
+        body.Controls.Add(_viewHost, 1, 0);
 
         // ---------- root ----------
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = Padding.Empty, Margin = Padding.Empty };
@@ -281,11 +298,21 @@ public sealed class MainForm : Form
         _procList.SelectedIndexChanged += (_, _) => OnProcessSelected();
         _refreshBtn.Click += async (_, _) => await RefreshProcessesAsync();
         _filterBox.TextChanged += (_, _) => ApplyProcessFilter();
-        _recordBtn.Click += async (_, _) => await RecordAsync();
-        _stopBtn.Click += async (_, _) => await StopAsync();
+        _bigRecordBtn.Click += async (_, _) => { if (_rec.IsRecording) await StopAsync(); else await RecordAsync(); };
+        _advToggleBtn.Click += (_, _) => ShowView(!_showSimple);
         _browseBtn.Click += (_, _) => BrowsePayload();
-        _modeBox.SelectedIndexChanged += (_, _) => UpdateModeUi();
+        _simpleBrowseBtn.Click += (_, _) => BrowsePayload();
+        _modeBox.SelectedIndexChanged += (_, _) => { UpdateModeUi(); SyncFromAdvanced(); };
+        _simpleModeBox.SelectedIndexChanged += (_, _) => SyncFromSimple();
+        _payloadBox.TextChanged += (_, _) => { if (!_syncing) { _syncing = true; _simplePayloadBox.Text = _payloadBox.Text; _syncing = false; } };
+        _simplePayloadBox.TextChanged += (_, _) => { if (!_syncing) { _syncing = true; _payloadBox.Text = _simplePayloadBox.Text; _syncing = false; } };
         _injectBtn.Click += async (_, _) => await InjectAsync();
+        _simpleInjectBtn.Click += async (_, _) => await InjectAsync();
+        _recoverBtn.Click += async (_, _) => await RecoverModuleAsync();
+        void OpenInjected() { ShowView(false); SelectTabByName("Injected"); }
+        _cardDllTitle.Click += (_, _) => OpenInjected(); _cardDllBody.Click += (_, _) => OpenInjected();
+        _cardMemTitle.Click += (_, _) => OpenInjected(); _cardMemBody.Click += (_, _) => OpenInjected();
+        _cardMonoTitle.Click += (_, _) => OpenInjected(); _cardMonoBody.Click += (_, _) => OpenInjected();
         _searchBox.TextChanged += (_, _) => { _searchTimer.Stop(); _searchTimer.Start(); };
         _searchBox.KeyDown += (_, e) =>
         {
@@ -310,8 +337,12 @@ public sealed class MainForm : Form
         _tip.SetToolTip(_execBox, "Memory mode: run the written bytes as a remote thread");
         _tip.SetToolTip(_injectBtn, "Inject into the selected process (Ctrl+drag payload also works)");
         _tip.SetToolTip(_searchBox, "Search assemblies, types, methods and runtime exports");
-        _tip.SetToolTip(_recordBtn, "Start a recording session (F5 refreshes the process list)");
-        _tip.SetToolTip(_stopBtn, "Stop the current recording session");
+        _tip.SetToolTip(_bigRecordBtn, "Record / stop a session — everything the target does is logged (F5 refreshes the process list)");
+        _tip.SetToolTip(_simpleInjectBtn, "Inject the payload into the selected process (drag & drop a file onto this window to set it)");
+        _tip.SetToolTip(_recoverBtn, "Read the module straight out of the target's memory and save it to disk");
+        _tip.SetToolTip(_recoverBox, "Modules loaded in the target — a dll you just injected shows up here");
+        _tip.SetToolTip(_advToggleBtn, "Switch between this simple view and the advanced tabs");
+        _tip.SetToolTip(_cardMonoBody, "mono injection results — click to open the Injected tab");
 
         UpdateModeUi();
         UpdateButtons();
@@ -409,6 +440,372 @@ public sealed class MainForm : Form
         panel.Controls.Add(row1, 0, 1);
         panel.Controls.Add(row2, 0, 2);
         return panel;
+    }
+
+    // =========================================================================
+    // simple view (default)
+    // =========================================================================
+    private void BuildAdvancedPanel()
+    {
+        var adv = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(6, 8, 10, 8) };
+        adv.RowStyles.Add(new RowStyle(SizeType.Absolute, 116));
+        adv.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        adv.Controls.Add(BuildInjectPanel(), 0, 0);
+        BuildTabs();
+        adv.Controls.Add(_tabs, 0, 1);
+        _advPanel = adv;
+    }
+
+    private void BuildSimplePanel()
+    {
+        // --- one big record / stop button ---
+        _bigRecordBtn = new Button
+        {
+            Text = "●  R E C O R D",
+            Dock = DockStyle.Fill,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = CRedDark,
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 16f, FontStyle.Bold),
+            Cursor = Cursors.Hand,
+            Margin = Padding.Empty,
+            UseVisualStyleBackColor = false,
+        };
+        _bigRecordBtn.FlatAppearance.BorderColor = CRed;
+        _bigRecordBtn.FlatAppearance.BorderSize = 2;
+        _bigRecordBtn.FlatAppearance.MouseOverBackColor = Color.FromArgb(140, 36, 43);
+        _bigRecordBtn.FlatAppearance.MouseDownBackColor = Color.FromArgb(90, 24, 30);
+
+        _simpleStatus = new Label
+        {
+            Dock = DockStyle.Fill,
+            ForeColor = CDim,
+            Font = FSub,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true,
+            Padding = new Padding(2, 0, 0, 0),
+            Text = "pick a process on the left, then hit RECORD",
+        };
+
+        // --- "has anything been injected?" cards ---
+        _cardDllTitle = CardTitle("DLL");
+        _cardDllBody = CardBody();
+        var dllCard = MakeCard(_cardDllTitle, _cardDllBody);
+        _cardMemTitle = CardTitle("MEMORY");
+        _cardMemBody = CardBody();
+        var memCard = MakeCard(_cardMemTitle, _cardMemBody);
+        _cardMonoTitle = CardTitle("MONO ★", accent: true);
+        _cardMonoBody = CardBody("— no mono injection yet —\npick a managed dll below, hit Inject ▶");
+        var monoCard = MakeCard(_cardMonoTitle, _cardMonoBody);
+
+        var cards = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+        cards.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        cards.Controls.Add(dllCard, 0, 0);
+        cards.Controls.Add(memCard, 1, 0);
+        cards.Controls.Add(monoCard, 2, 0);
+
+        // --- inject row ---
+        _simpleModeBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            BackColor = CField,
+            ForeColor = CText,
+            FlatStyle = FlatStyle.Flat,
+            Font = FUi,
+            Margin = Padding.Empty,
+        };
+        _simpleModeBox.Items.AddRange(new object[] { "DLL", "Memory", "Mono" });
+        _simpleModeBox.SelectedIndex = 0;
+        _simplePayloadBox = MakeTextBox();
+        _simpleBrowseBtn = MakeButton("Browse…");
+        _simpleInjectBtn = AccentButton("Inject ▶");
+
+        var injectRow = RowPanel(
+            new ColumnStyle(SizeType.Absolute, 118),
+            new ColumnStyle(SizeType.Percent, 100),
+            new ColumnStyle(SizeType.Absolute, 92),
+            new ColumnStyle(SizeType.Absolute, 130));
+        injectRow.Controls.Add(_simpleModeBox, 0, 0);
+        injectRow.Controls.Add(_simplePayloadBox, 1, 0);
+        injectRow.Controls.Add(_simpleBrowseBtn, 2, 0);
+        injectRow.Controls.Add(_simpleInjectBtn, 3, 0);
+
+        // --- recover row ---
+        var recoverLabel = new Label
+        {
+            Text = "recover:",
+            Dock = DockStyle.Fill,
+            ForeColor = CDim,
+            TextAlign = ContentAlignment.MiddleRight,
+            Margin = new Padding(0, 0, 6, 0),
+        };
+        _recoverBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            BackColor = CField,
+            ForeColor = CText,
+            FlatStyle = FlatStyle.Flat,
+            Font = FData,
+            Margin = Padding.Empty,
+        };
+        _recoverBtn = MakeButton("Recover ▶");
+        var recoverRow = RowPanel(
+            new ColumnStyle(SizeType.Absolute, 118),
+            new ColumnStyle(SizeType.Percent, 100),
+            new ColumnStyle(SizeType.Absolute, 130));
+        recoverRow.Controls.Add(recoverLabel, 0, 0);
+        recoverRow.Controls.Add(_recoverBox, 1, 0);
+        recoverRow.Controls.Add(_recoverBtn, 2, 0);
+
+        var p = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 5,
+            Padding = new Padding(10, 10, 12, 10),
+            Margin = Padding.Empty,
+            BackColor = CPanel,
+        };
+        p.RowStyles.Add(new RowStyle(SizeType.Absolute, 86));
+        p.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        p.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        p.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        p.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        p.Controls.Add(_bigRecordBtn, 0, 0);
+        p.Controls.Add(_simpleStatus, 0, 1);
+        p.Controls.Add(cards, 0, 2);
+        p.Controls.Add(injectRow, 0, 3);
+        p.Controls.Add(recoverRow, 0, 4);
+        _simplePanel = p;
+        UpdateInjectCards();
+    }
+
+    private static Label CardTitle(string text, bool accent = false) => new()
+    {
+        Text = text,
+        Dock = DockStyle.Top,
+        Height = 22,
+        Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+        ForeColor = accent ? CRed : CText,
+    };
+
+    private static Label CardBody(string placeholder = "— nothing injected yet —") => new()
+    {
+        Dock = DockStyle.Fill,
+        Font = FSub,
+        ForeColor = CDim,
+        TextAlign = ContentAlignment.TopLeft,
+        Text = placeholder,
+    };
+
+    private Panel MakeCard(Label title, Label body)
+    {
+        var card = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = CDark,
+            Margin = new Padding(0, 0, 8, 0),
+            Padding = new Padding(10, 8, 10, 8),
+        };
+        card.Controls.Add(body);
+        card.Controls.Add(title);
+        card.Paint += (_, e) =>
+        {
+            using var pen = new Pen(CLine);
+            e.Graphics.DrawRectangle(pen, 0, 0, card.ClientSize.Width - 1, card.ClientSize.Height - 1);
+        };
+        return card;
+    }
+
+    private void ShowView(bool simple)
+    {
+        _showSimple = simple;
+        _viewHost.Controls.Clear();
+        var v = simple ? _simplePanel : _advPanel;
+        v.Dock = DockStyle.Fill;
+        _viewHost.Controls.Add(v);
+        _advToggleBtn.Text = simple ? "Advanced ▸" : "◀ Simple";
+    }
+
+    private void SelectTabByName(string name)
+    {
+        foreach (TabPage tp in _tabs.TabPages)
+            if (tp.Text.Equals(name, StringComparison.OrdinalIgnoreCase)) { _tabs.SelectedTab = tp; return; }
+    }
+
+    private void SyncFromAdvanced()
+    {
+        if (_syncing) return;
+        _syncing = true;
+        _simpleModeBox.SelectedIndex = _modeBox.SelectedIndex;
+        _simplePayloadBox.Text = _payloadBox.Text;
+        _syncing = false;
+    }
+
+    private void SyncFromSimple()
+    {
+        if (_syncing) return;
+        _syncing = true;
+        _modeBox.SelectedIndex = _simpleModeBox.SelectedIndex;
+        _payloadBox.Text = _simplePayloadBox.Text;
+        _syncing = false;
+        UpdateModeUi();
+    }
+
+    private void SetSimpleStatus(string text, bool ok = true)
+    {
+        _simpleStatus.ForeColor = ok ? CDim : Color.FromArgb(240, 110, 115);
+        _simpleStatus.Text = text;
+    }
+
+    private void UpdateInjectCards()
+    {
+        SetCard(_cardDllTitle, _cardDllBody, "DLL");
+        SetCard(_cardMemTitle, _cardMemBody, "Memory");
+        SetCard(_cardMonoTitle, _cardMonoBody, "Mono", accent: true);
+    }
+
+    private void SetCard(Label title, Label body, string mode, bool accent = false)
+    {
+        title.Text = accent ? "MONO ★" : mode.ToUpperInvariant();
+        if (_lastByMode.TryGetValue(mode, out var it))
+        {
+            bool ok = it.Status == "Success";
+            string file = Path.GetFileName(it.Payload);
+            string when = it.Time.ToString("HH:mm:ss");
+            string target = _proc is { } p ? $"{p.Name} (PID {p.Pid})" : it.Target;
+            if (mode == "Mono" && it.Target.Contains('→'))
+                target = it.Target[(it.Target.IndexOf('→') + 1)..].Trim();
+            body.ForeColor = ok ? COk : Color.FromArgb(235, 95, 100);
+            body.Text = (ok ? "✓ " : "✗ ") + file + "\n" + target + "\n" + when +
+                        (ok ? "" : "  — see Injected tab");
+        }
+        else
+        {
+            body.ForeColor = CDim;
+            body.Text = accent
+                ? "— no mono injection yet —\npick a managed dll below, hit Inject ▶"
+                : "— nothing injected yet —";
+        }
+    }
+
+    /// <summary>Refreshes the recover dropdown — injected dlls appear here once mapped.</summary>
+    private void RebuildRecoverList()
+    {
+        string? keep = _recoverBox.SelectedItem as string;
+        _recoverBox.BeginUpdate();
+        _recoverBox.Items.Clear();
+        foreach (var m in _modules)
+            if (!string.IsNullOrEmpty(m.Name))
+                _recoverBox.Items.Add(m.Name);
+        _recoverBox.EndUpdate();
+
+        if (keep is not null && _recoverBox.Items.Contains(keep))
+            _recoverBox.SelectedItem = keep;                       // keep the current pick
+        else if (_lastByMode.TryGetValue("Mono", out var last) &&    // else prefer the dll we just injected
+                 _recoverBox.Items.Contains(Path.GetFileName(last.Payload)))
+            _recoverBox.SelectedItem = Path.GetFileName(last.Payload);
+        else if (_recoverBox.Items.Count > 0)
+            _recoverBox.SelectedIndex = 0;
+        UpdateButtons();
+    }
+
+    // =========================================================================
+    // recover a dll (dump a module straight out of the target's memory)
+    // =========================================================================
+    private async Task RecoverModuleAsync()
+    {
+        if (_proc is null || _recovering) return;
+        if (_recoverBox.SelectedItem is not string sel)
+        {
+            MessageBox.Show(this, "Pick a module to recover from the dropdown.", "Dll Dumper",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        var mod = _modules.FirstOrDefault(m => m.Name == sel);
+        if (mod is null)
+        {
+            SetSimpleStatus($"module \"{sel}\" is no longer loaded in the target", false);
+            return;
+        }
+
+        using var sfd = new SaveFileDialog
+        {
+            Title = $"Recover {sel} from {_proc.Name}",
+            Filter = "Dynamic-link library (*.dll)|*.dll|Executable (*.exe)|*.exe|All files (*.*)|*.*",
+            FileName = Path.GetFileName(mod.Path.Length > 0 ? mod.Path : sel),
+        };
+        if (sfd.ShowDialog(this) != DialogResult.OK) return;
+
+        _recovering = true;
+        UpdateButtons();
+        string outPath = sfd.FileName;
+        SetSimpleStatus($"recovering {sel} ({MemoryRegion.FormatSize(mod.Size)}) from {_proc.Name}'s memory…");
+        SetStatus($"recovering {sel} → {outPath} …");
+
+        string summary;
+        try
+        {
+            var proc = _proc;
+            var m = mod;
+            summary = await Task.Run(() => ModuleDumper.Dump(proc.Handle, m, outPath));
+        }
+        catch (Exception ex)
+        {
+            _recovering = false;
+            UpdateButtons();
+            _rec.RecordError("recover", ex.Message);
+            SetSimpleStatus($"✗ could not recover {sel}: {ex.Message}", false);
+            SetStatus("recover failed: " + ex.Message, true);
+            return;
+        }
+
+        _recovering = false;
+        UpdateButtons();
+        _rec.Add("Recover", sel, $"{summary} → {outPath}");
+        long bytes = new FileInfo(outPath).Length;
+        SetSimpleStatus($"✓ recovered {sel} → {Path.GetFileName(outPath)} ({MemoryRegion.FormatSize(bytes)})");
+        SetStatus($"recovered {sel} → {outPath} · {summary}");
+    }
+
+    /// <summary>Finds a static entry point inside a managed payload so mono mode "just works".</summary>
+    private static bool TryAutoEntry(string payloadPath, out string ns, out string cls, out string method)
+    {
+        ns = cls = method = "";
+        try
+        {
+            var scan = MonoInspector.ScanAssemblies(new List<string> { payloadPath });
+            var asm = scan.Assemblies.FirstOrDefault();
+            if (asm is null) return false;
+
+            var types = asm.Types.Where(t => t.Methods.Count > 0).ToList();
+            if (types.Count == 0) return false;
+
+            static bool Has(string s, params string[] keys) =>
+                keys.Any(k => s.Contains(k, StringComparison.OrdinalIgnoreCase));
+
+            var type = types.FirstOrDefault(t => Has(t.FullName, "Loader", "Plugin", "Bootstrap", "Entry", "Main"))
+                    ?? types[0];
+            var meth = type.Methods.FirstOrDefault(x => x is "Load" or "Init" or "Initialize" or "Main" or "Start" or "Awake" or "Run")
+                    ?? type.Methods.FirstOrDefault(x => Has(x, "Load", "Init", "Start", "Run", "Main"))
+                    ?? type.Methods[0];
+
+            string full = type.FullName;
+            int dot = full.LastIndexOf('.');
+            if (dot > 0) { ns = full[..dot]; cls = full[(dot + 1)..]; }
+            else cls = full;
+            method = meth;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void BuildTabs()
@@ -738,6 +1135,7 @@ public sealed class MainForm : Form
             if (tp.Text.Equals(want, StringComparison.OrdinalIgnoreCase))
             {
                 _tabs.SelectedTab = tp;
+                ShowView(simple: false);   // a tab was requested → open the advanced view
                 return;
             }
     }
@@ -791,6 +1189,7 @@ public sealed class MainForm : Form
                 $"{p.Name}  ·  PID {p.Pid}  ·  {p.Architecture}\n" +
                 $"{p.ExePath ?? "(path unavailable)"}";
 
+            SetSimpleStatus($"ready — {p.Name} selected · press RECORD");
             SetStatus($"Selected {p.Name} (PID {pid}) — press ● Record to capture mono, memory and files.");
             UpdateButtons();
             _ = RunCaptureAsync();
@@ -819,8 +1218,11 @@ public sealed class MainForm : Form
         _haveBaseline = false;
         _lastFiles = -1;
         _lastRegions = -1;
+        _lastRecoverCount = -1;
         _injTotal = 0;
         _injOk = 0;
+        _lastByMode.Clear();
+        UpdateInjectCards();
 
         _monoList.Items.Clear();
         _memList.Items.Clear();
@@ -833,7 +1235,9 @@ public sealed class MainForm : Form
         _filesInfo.Text = "";
         _injInfo.Text = "";
         _searchBox.Text = "";
+        _recoverBox.Items.Clear();
         _targetLabel.Text = "no process selected";
+        SetSimpleStatus("no process selected — pick one on the left");
         UpdateRecordUi();
     }
 
@@ -921,6 +1325,11 @@ public sealed class MainForm : Form
         RebuildFiles();
         RebuildMemory();
         if (monoChanged) ApplyMonoSearch();
+        if (_modules.Count != _lastRecoverCount)
+        {
+            _lastRecoverCount = _modules.Count;
+            RebuildRecoverList();   // newly injected dlls show up in the recover list
+        }
 
         if (_rec.IsRecording)
         {
@@ -1134,11 +1543,12 @@ public sealed class MainForm : Form
         }
         if (_rec.IsRecording) return;
 
-        _recordBtn.Enabled = false;
         try
         {
             _rec.StartSession();
             UpdateRecordUi();
+            UpdateButtons();
+            SetSimpleStatus($"capturing {_proc.Name} — mono, memory and files…");
             SetStatus($"● recording {_proc.Name} — capturing mono, memory and files…");
             await RunCaptureAsync();
             _tickTimer.Start();
@@ -1175,6 +1585,7 @@ public sealed class MainForm : Form
         string msg = _rec.StopSession(summary);
         UpdateButtons();
         UpdateRecordUi();
+        SetSimpleStatus($"{msg} · {_rec.Items.Count:N0} items — open Advanced ▸ Recorded to inspect");
         SetStatus($"{msg}. {_rec.Items.Count:N0} recorded items — see the Recorded tab (Save report exports it).");
     }
 
@@ -1228,9 +1639,13 @@ public sealed class MainForm : Form
 
     private void UpdateButtons()
     {
-        _recordBtn.Enabled = _proc is not null && !_rec.IsRecording && !_injecting;
-        _stopBtn.Enabled = _rec.IsRecording;
-        _injectBtn.Enabled = _proc is not null && !_injecting;
+        bool busy = _injecting || _recovering;
+        _bigRecordBtn.Enabled = _proc is not null && !busy;
+        if (!_rec.IsRecording) _bigRecordBtn.Text = "●  R E C O R D";
+        _simpleInjectBtn.Enabled = _proc is not null && !busy;
+        _injectBtn.Enabled = _proc is not null && !busy;
+        _recoverBtn.Enabled = _proc is not null && !busy && _recoverBox.Items.Count > 0;
+        _recoverBox.Enabled = _recoverBtn.Enabled;
         _refreshBtn.Enabled = !_refreshing;
     }
 
@@ -1305,12 +1720,20 @@ public sealed class MainForm : Form
         {
             string ns = _nsBox.Text.Trim(), cls = _clsBox.Text.Trim(),
                    m = _methodBox.Text.Trim(), ps = _paramBox.Text.Trim();
+
             if (cls.Length == 0 || m.Length == 0)
             {
-                MessageBox.Show(this,
-                    "Mono mode needs a class and a static method name.\n(e.g. class: Loader, method: Load)",
-                    "Dll Dumper", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                // simple view: no entry typed — pick one straight out of the payload dll
+                if (!TryAutoEntry(payload, out ns, out cls, out m))
+                {
+                    MessageBox.Show(this,
+                        "Mono mode needs a class and a static method name.\n" +
+                        "(e.g. class: Loader, method: Load) — or use a payload that has managed metadata.",
+                        "Dll Dumper", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                _nsBox.Text = ns; _clsBox.Text = cls; _methodBox.Text = m;   // mirror into the advanced view
+                SetStatus($"mono entry auto-picked from the payload: {(ns.Length > 0 ? ns + "." : "")}{cls}.{m}()");
             }
             if (ps.Length > 0)
             {
@@ -1384,6 +1807,8 @@ public sealed class MainForm : Form
         if (res.Success) _injOk++;
 
         _rec.RecordInjection(item);
+        _lastByMode[mode] = item;
+        UpdateInjectCards();
         _injDetail.Text = string.Join(Environment.NewLine, item.Steps);
         UpdateRecordUi();
         UpdateInjectInfo();
@@ -1391,10 +1816,18 @@ public sealed class MainForm : Form
         _injecting = false;
         UpdateButtons();
         SetStatus(res.Success ? $"✓ {res.Summary}" : $"✗ {res.Summary}", !res.Success);
+        if (res.Success)
+            SetSimpleStatus($"✓ {mode} injected — {Path.GetFileName(payload)} → {_proc?.Name}" +
+                            (mode == "Mono" ? " · the dll is in the recover list now" : ""));
+        else
+            SetSimpleStatus($"✗ {mode} injection failed — open the Injected tab for the step log", false);
 
         // pick up (and record) anything that was mapped into the target by the injection
         if (version == _version)
+        {
             await RunCaptureAsync();
+            RebuildRecoverList();   // a dll that just got mapped becomes recoverable
+        }
     }
 
     private void OnInjectStep(InjectItem item, string message)
