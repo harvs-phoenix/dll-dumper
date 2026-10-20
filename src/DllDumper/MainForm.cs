@@ -823,10 +823,15 @@ public sealed class MainForm : Form
             catch { /* no baseline available — tracked-injection recovery below still runs */ }
         }
 
-        var scan = await Task.Run(() => ModuleDumper.ScanImages(proc.Handle));
+        var scan = await Task.Run(() =>
+        {
+            var all = ModuleDumper.ScanImages(proc.Handle);
+            all.AddRange(ModuleDumper.ScanPrivateImages(proc.Handle));
+            return all;
+        });
         if (version != _version) return done;
 
-        // everything mapped during the session that wasn't there when Record started
+        // everything mapped (or heap-copied) during the session that wasn't there at record start
         var known = baseline is null
             ? new HashSet<long>()
             : new HashSet<long>(baseline.Select(i => i.Base.ToInt64()));
@@ -842,9 +847,13 @@ public sealed class MainForm : Form
             try
             {
                 string outPath = UniquePath(Path.Combine(dir, Path.GetFileNameWithoutExtension(img.Name) + ".dll"));
-                string detail = await Task.Run(() => ModuleDumper.Dump(proc.Handle, img, outPath));
+                bool raw = img.Path.StartsWith("private memory @", StringComparison.Ordinal);
+                string detail = raw
+                    ? ModuleDumper.DumpRaw(proc.Handle, img, outPath)
+                    : await Task.Run(() => ModuleDumper.Dump(proc.Handle, img, outPath));
                 recovered[img.Name] = MemoryRegion.FormatSize(img.Size);
-                _rec.Add("Recover", img.Name, $"new during session · {detail} → {outPath}");
+                _rec.Add("Recover", img.Name,
+                    $"{(raw ? "private memory (byte-loaded)" : "new mapped image")} · {detail} · {outPath}");
                 done.Add($"✓ recovered {img.Name} ({MemoryRegion.FormatSize(img.Size)})");
             }
             catch (Exception ex)
@@ -1702,7 +1711,14 @@ public sealed class MainForm : Form
         try
         {
             _rec.StartSession();
-            _baselineTask = Task.Run(() => ModuleDumper.ScanImages(_proc.Handle)); // "before" image map for stop-recovery
+            // "before" snapshot for stop-recovery: mapped images + private-memory
+            // images (mono byte-loaded assemblies live in the heap, not the map)
+            _baselineTask = Task.Run(() =>
+            {
+                var all = ModuleDumper.ScanImages(_proc.Handle);
+                all.AddRange(ModuleDumper.ScanPrivateImages(_proc.Handle));
+                return all;
+            });
             _cardDllRec.Text = ""; _cardMemRec.Text = ""; _cardMonoRec.Text = "";
             SetFolderLine("recording — press STOP and the folder path appears here", saved: false);
             UpdateRecordUi();
