@@ -18,32 +18,30 @@ No NuGet packages. No installer. One `.exe`.
 
 ## the simple view (default)
 
-The intended flow — record, mod, stop, and it tells you if the dll came back:
+The whole view is one button. That's the point:
 
 1. pick a process on the left
 2. hit the big **● RECORD** button — it flips to **■ STOP · 00:06** and counts up live
-3. inject while it records: this app's **Inject ▶** row, or **your own external injector** —
-   either way, a snapshot of the target's mapped images was taken when recording started
-4. hit **■ STOP** — the image map is diffed against that snapshot and every dll that appeared
-   during the session is dumped to the `recovered\` folder next to the exe, with the verdict
-   right in the status line:
-   `Recorded for 00:08 · 246 items · ✓ recovered MyMod.dll (96 KB)`
-   or `✗ could not recover MyMod.dll — not found in the target's memory`
-5. the three cards answer the only question that matters — **DLL / MEMORY / MONO ★**:
-   `— nothing injected yet —` until something lands, then green
-   `✓ TestPayload.dll → TestTarget (PID 1234)` (or red `✗` with the reason to chase in the log),
-   and after Stop each card also shows `↻ recovered · 96 KB` (or red `↻ recover failed`)
-6. the recover row is the manual escape hatch: pick any loaded module → **Recover ▶** → dumped
-   to a file you choose. A dll you just injected shows up in the list automatically.
+3. inject with **your own injector** (or this app's — see Advanced) while it records;
+   mono, memory and files are captured the whole time
+4. hit **■ STOP** — the status line says if the dll came back, and the green line says
+   exactly where everything landed:
+   `✓ recovered MyMod.dll (96 KB)`
+   `folder → C:\You\Desktop\sessions\2026-10-20_153824_YourGame`
 
-**Advanced ▸** (top-right) opens the full inspector: mono exports & assemblies, memory map,
-mapped files, the recorded session log and the injection ledger.
+Every session folder (on your **Desktop** under `sessions\`) contains `report.txt`
+(full log + injections + recover verdicts), `mono.txt`, `memory.txt`, `files.txt` and the
+`recovered\*.dll` files — zip it and send it as-is. **Open folder** jumps straight to it.
+
+**Advanced ▸** (top-right) holds everything else: the three injectors, manual recover of any
+module, mono exports & assemblies, memory map, mapped files, the recorded log and the
+injection ledger.
 
 ## features
 
 | | |
 |---|---|
-| **simple by default** | record → inject (ours or yours) → stop → the status line says if the dll could be recovered |
+| **record + stop, that's it** | the default view is one button — the folder path appears in green after Stop |
 | **process picker** | live list of every running process (name, PID, window title, memory), filterable |
 | **mono inspector** | auto-detects **Mono** *and* **CoreCLR** runtimes, dumps `mono_*` exports, every loaded assembly with type + method counts |
 | **memory map** | full `VirtualQueryEx` walk — base, size, state, protect, type, owning module |
@@ -113,12 +111,8 @@ DllDumper.exe TestTarget Recorded
 
 1. pick the target in the left list
 2. hit the big **● RECORD**, let it run
-3. inject — this app (**Inject ▶**, mono mode auto-picks the entry point) or your own injector
-4. hit **■ STOP** — the status line reports whether the dll was recovered, and everything lands
-   in one neat folder: `sessions\2026-10-20_152016_YourGame\` containing `report.txt` (full log,
-   injections, recover verdicts), `mono.txt`, `memory.txt`, `files.txt` and `recovered\*.dll`.
-   Zip that folder and send it to whoever is helping you — **Open folder** (next to Recover)
-   jumps straight to it
+3. inject — your own injector, or this app's via **Advanced ▸** (mono mode auto-picks the entry point)
+4. hit **■ STOP** — the green line tells you exactly where the session folder landed (on your Desktop)
 5. **Advanced ▸** holds the full detail: **Mono / Memory / Files / Recorded / Injected** tabs
 
 ### samples

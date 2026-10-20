@@ -43,6 +43,7 @@ public sealed class MainForm : Form
     private Panel _viewHost = null!, _advPanel = null!;
     private TableLayoutPanel _simplePanel = null!;
     private Label _simpleStatus = null!;
+    private Label _folderLine = null!;   // "folder → C:\...\Desktop\sessions\..." after Stop
     private Label _cardDllTitle = null!, _cardDllBody = null!;
     private Label _cardMemTitle = null!, _cardMemBody = null!;
     private Label _cardMonoTitle = null!, _cardMonoBody = null!;
@@ -453,13 +454,47 @@ public sealed class MainForm : Form
     // =========================================================================
     private void BuildAdvancedPanel()
     {
-        var adv = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(6, 8, 10, 8) };
+        var adv = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(6, 8, 10, 8) };
         adv.RowStyles.Add(new RowStyle(SizeType.Absolute, 116));
+        adv.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         adv.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         adv.Controls.Add(BuildInjectPanel(), 0, 0);
+        adv.Controls.Add(BuildRecoverStrip(), 0, 1);
         BuildTabs();
-        adv.Controls.Add(_tabs, 0, 1);
+        adv.Controls.Add(_tabs, 0, 2);
         _advPanel = adv;
+    }
+
+    /// <summary>Manual recover of any loaded module — lives in the Advanced view.</summary>
+    private Control BuildRecoverStrip()
+    {
+        var recoverLabel = new Label
+        {
+            Text = "recover any module:",
+            Dock = DockStyle.Fill,
+            ForeColor = CDim,
+            TextAlign = ContentAlignment.MiddleRight,
+            Margin = new Padding(0, 0, 6, 0),
+        };
+        _recoverBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            BackColor = CField,
+            ForeColor = CText,
+            FlatStyle = FlatStyle.Flat,
+            Font = FData,
+            Margin = Padding.Empty,
+        };
+        _recoverBtn = MakeButton("Recover ▶");
+        var row = RowPanel(
+            new ColumnStyle(SizeType.Absolute, 150),
+            new ColumnStyle(SizeType.Percent, 100),
+            new ColumnStyle(SizeType.Absolute, 130));
+        row.Controls.Add(recoverLabel, 0, 0);
+        row.Controls.Add(_recoverBox, 1, 0);
+        row.Controls.Add(_recoverBtn, 2, 0);
+        return row;
     }
 
     private void BuildSimplePanel()
@@ -493,39 +528,44 @@ public sealed class MainForm : Form
             Text = "1 select a process on the left  ·  2 click RECORD  ·  3 inject (yours or ours)  ·  4 click STOP — logs, data and recovered dlls land in one folder",
         };
 
-        // --- "has anything been injected?" cards ---
+        // --- folder line: where everything lands ---
+        _folderLine = new Label
+        {
+            Dock = DockStyle.Fill,
+            ForeColor = CDim,
+            Font = FSub,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true,
+            Padding = new Padding(2, 0, 0, 0),
+            Text = $"folders → {SessionExporter.Root}",
+        };
+        _openFolderBtn = MakeButton("Open folder");
+        var folderRow = RowPanel(
+            new ColumnStyle(SizeType.Percent, 100),
+            new ColumnStyle(SizeType.Absolute, 120));
+        folderRow.Controls.Add(_folderLine, 0, 0);
+        folderRow.Controls.Add(_openFolderBtn, 1, 0);
+
+        // --- state mirrors the logic still drives (cards, inject row) ---
+        // constructed for state/sync but not shown — the simple view is
+        // record + stop only; everything else lives behind Advanced ▸
         _cardDllTitle = CardTitle("DLL");
         _cardDllBody = CardBody();
         _cardDllRec = CardRecLine();
-        var dllCard = MakeCard(_cardDllTitle, _cardDllBody, _cardDllRec);
         _cardMemTitle = CardTitle("MEMORY");
         _cardMemBody = CardBody();
         _cardMemRec = CardRecLine();
-        var memCard = MakeCard(_cardMemTitle, _cardMemBody, _cardMemRec);
         _cardMonoTitle = CardTitle("MONO ★", accent: true);
         _cardMonoBody = CardBody("— no mono injection yet —\npick a managed dll below, hit Inject ▶");
         _cardMonoRec = CardRecLine();
-        var monoCard = MakeCard(_cardMonoTitle, _cardMonoBody, _cardMonoRec);
 
-        var cards = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31));
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31));
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
-        cards.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        cards.Controls.Add(dllCard, 0, 0);
-        cards.Controls.Add(memCard, 1, 0);
-        cards.Controls.Add(monoCard, 2, 0);
-
-        // --- inject row ---
         _simpleModeBox = new ComboBox
         {
-            Dock = DockStyle.Fill,
             DropDownStyle = ComboBoxStyle.DropDownList,
             BackColor = CField,
             ForeColor = CText,
             FlatStyle = FlatStyle.Flat,
             Font = FUi,
-            Margin = Padding.Empty,
         };
         _simpleModeBox.Items.AddRange(new object[] { "DLL", "Memory", "Mono" });
         _simpleModeBox.SelectedIndex = 0;
@@ -533,66 +573,22 @@ public sealed class MainForm : Form
         _simpleBrowseBtn = MakeButton("Browse…");
         _simpleInjectBtn = AccentButton("Inject ▶");
 
-        var injectRow = RowPanel(
-            new ColumnStyle(SizeType.Absolute, 118),
-            new ColumnStyle(SizeType.Percent, 100),
-            new ColumnStyle(SizeType.Absolute, 92),
-            new ColumnStyle(SizeType.Absolute, 130));
-        injectRow.Controls.Add(_simpleModeBox, 0, 0);
-        injectRow.Controls.Add(_simplePayloadBox, 1, 0);
-        injectRow.Controls.Add(_simpleBrowseBtn, 2, 0);
-        injectRow.Controls.Add(_simpleInjectBtn, 3, 0);
-
-        // --- recover row ---
-        var recoverLabel = new Label
-        {
-            Text = "recover:",
-            Dock = DockStyle.Fill,
-            ForeColor = CDim,
-            TextAlign = ContentAlignment.MiddleRight,
-            Margin = new Padding(0, 0, 6, 0),
-        };
-        _recoverBox = new ComboBox
-        {
-            Dock = DockStyle.Fill,
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            BackColor = CField,
-            ForeColor = CText,
-            FlatStyle = FlatStyle.Flat,
-            Font = FData,
-            Margin = Padding.Empty,
-        };
-        _recoverBtn = MakeButton("Recover ▶");
-        _openFolderBtn = MakeButton("Open folder");
-        var recoverRow = RowPanel(
-            new ColumnStyle(SizeType.Absolute, 118),
-            new ColumnStyle(SizeType.Percent, 100),
-            new ColumnStyle(SizeType.Absolute, 100),
-            new ColumnStyle(SizeType.Absolute, 130));
-        recoverRow.Controls.Add(recoverLabel, 0, 0);
-        recoverRow.Controls.Add(_recoverBox, 1, 0);
-        recoverRow.Controls.Add(_openFolderBtn, 2, 0);
-        recoverRow.Controls.Add(_recoverBtn, 3, 0);
-
         var p = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 4,
             Padding = new Padding(10, 10, 12, 10),
             Margin = Padding.Empty,
             BackColor = CPanel,
         };
-        p.RowStyles.Add(new RowStyle(SizeType.Absolute, 86));
-        p.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        p.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
+        p.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        p.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         p.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        p.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        p.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         p.Controls.Add(_bigRecordBtn, 0, 0);
         p.Controls.Add(_simpleStatus, 0, 1);
-        p.Controls.Add(cards, 0, 2);
-        p.Controls.Add(injectRow, 0, 3);
-        p.Controls.Add(recoverRow, 0, 4);
+        p.Controls.Add(folderRow, 0, 2);
         _simplePanel = p;
         UpdateInjectCards();
     }
@@ -685,6 +681,14 @@ public sealed class MainForm : Form
     {
         _simpleStatus.ForeColor = ok ? CDim : Color.FromArgb(240, 110, 115);
         _simpleStatus.Text = text;
+    }
+
+    /// <summary>The "folder → …" line under the big button: dim for hints, green for a saved folder.</summary>
+    private void SetFolderLine(string text, bool saved)
+    {
+        _folderLine.Text = text;
+        _folderLine.ForeColor = saved ? COk : CDim;
+        _tip.SetToolTip(_folderLine, text);
     }
 
     private void UpdateInjectCards()
@@ -1700,6 +1704,7 @@ public sealed class MainForm : Form
             _rec.StartSession();
             _baselineTask = Task.Run(() => ModuleDumper.ScanImages(_proc.Handle)); // "before" image map for stop-recovery
             _cardDllRec.Text = ""; _cardMemRec.Text = ""; _cardMonoRec.Text = "";
+            SetFolderLine("recording — press STOP and the folder path appears here", saved: false);
             UpdateRecordUi();
             UpdateButtons();
             SetSimpleStatus($"capturing {_proc.Name} — mono, memory and files…");
@@ -1779,15 +1784,10 @@ public sealed class MainForm : Form
             ? "  ·  " + string.Join("  ·  ", shown) +
               (recovered.Count > 4 ? $"  ·  +{recovered.Count - 4} more" : "")
             : "";
-        string where = folder != "" ? $"  ·  session → {RelToExe(folder)}" : "";
-        SetSimpleStatus($"{msg} · {_rec.Items.Count:N0} items{tail}{where}", !anyFail);
+        string where = folder != "" ? $"  ·  folder → {folder}" : "";
+        if (folder != "") SetFolderLine($"folder → {folder}", saved: true);
+        SetSimpleStatus($"{msg} · {_rec.Items.Count:N0} items{tail}", !anyFail);
         SetStatus($"{msg}. {_rec.Items.Count:N0} recorded items{tail}{where}", anyFail);
-    }
-
-    private static string RelToExe(string folder)
-    {
-        try { return Path.GetRelativePath(AppContext.BaseDirectory, folder); }
-        catch { return folder; }
     }
 
     private void OpenSessionFolder()

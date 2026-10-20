@@ -10,8 +10,9 @@ namespace DllDumper.Core;
 /// </summary>
 public static class SessionExporter
 {
-    /// <summary>Root folder next to the exe where sessions are created.</summary>
-    public static string Root => Path.Combine(AppContext.BaseDirectory, "sessions");
+    /// <summary>Root folder on the desktop (homescreen) where sessions are created.</summary>
+    public static string Root => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "sessions");
 
     /// <summary>Creates a fresh timestamped session folder, e.g. sessions\2026-10-20_145502_GorillaTag.</summary>
     public static string CreateSessionFolder(string targetName)
