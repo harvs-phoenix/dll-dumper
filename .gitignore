@@ -1,0 +1,14 @@
+## build output
+bin/
+obj/
+publish/
+
+## IDE
+.vs/
+*.user
+*.suo
+.idea/
+
+## misc
+*.log
+*.zip

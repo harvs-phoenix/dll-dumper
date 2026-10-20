@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/TestPayload/TestPayload.csproj" />
+    <Project Path="samples/TestTarget/TestTarget.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/DllDumper/DllDumper.csproj" />
+  </Folder>
+</Solution>
