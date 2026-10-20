@@ -180,6 +180,7 @@ public static class ModuleDumper
     public static List<ModuleInfo> ScanPrivateImages(IntPtr hProcess)
     {
         var found = new List<ModuleInfo>();
+        var seenBases = new HashSet<long>();
         int mbiSize = Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
         long addr = 0;
 
@@ -197,19 +198,74 @@ public static class ModuleDumper
                 && protect is Native.PAGE_READONLY or Native.PAGE_READWRITE or Native.PAGE_WRITECOPY
                     or Native.PAGE_EXECUTE_READ or Native.PAGE_EXECUTE_READWRITE or Native.PAGE_EXECUTE_WRITECOPY;
 
+            // the injected copy is usually somewhere in the MIDDLE of a heap region,
+            // not at its base — so scan the whole region for MZ, not just the start
             if (readable && size >= 0x200)
-            {
-                var img = TryReadPrivateImage(hProcess, mbi.BaseAddress, size);
-                if (img is not null &&
-                    !found.Any(f => f.Name == img.Name && f.Size == img.Size))
-                    found.Add(img);
-            }
+                ScanRegionForImages(hProcess, baseAddr, size, found, seenBases);
 
             long next = baseAddr + size;
             if (next <= addr) break;
             addr = next;
         }
         return found;
+    }
+
+    /// <summary>
+    /// Reads a private region in chunks and validates every "MZ" occurrence as a
+    /// managed PE image. Random heap bytes rarely pass the PE + CLI-header checks,
+    /// so false positives are filtered out by <see cref="TryReadPrivateImage"/>.
+    /// </summary>
+    private static void ScanRegionForImages(IntPtr h, long regionBase, long regionSize,
+        List<ModuleInfo> found, HashSet<long> seenBases)
+    {
+        const int Chunk = 0x100000;                 // 1 MB at a time
+        var buf = new byte[Chunk];
+        long offset = 0;
+        byte carry = 0;
+        bool hasCarry = false;
+
+        while (offset < regionSize)
+        {
+            int toRead = (int)Math.Min(Chunk, regionSize - offset);
+            if (!Native.ReadProcessMemory(h, (IntPtr)(regionBase + offset), buf,
+                    (nuint)toRead, out nuint got) || got < 1)
+            {
+                offset += toRead;                   // unreadable chunk — skip it
+                hasCarry = false;
+                continue;
+            }
+            int n = (int)got;
+            long regionEnd = regionBase + regionSize;
+
+            // an "MZ" can straddle a chunk boundary — check the carried byte too
+            if (hasCarry && carry == (byte)'M' && buf[0] == (byte)'Z')
+                TryAddImage(h, regionBase + offset - 1, regionEnd, found, seenBases);
+
+            for (int i = 0; i < n - 1; i++)
+            {
+                if (buf[i] == (byte)'M' && buf[i + 1] == (byte)'Z')
+                    TryAddImage(h, regionBase + offset + i, regionEnd, found, seenBases);
+            }
+
+            carry = buf[n - 1];
+            hasCarry = true;
+            offset += n;
+        }
+    }
+
+    private static void TryAddImage(IntPtr h, long cand, long regionEnd,
+        List<ModuleInfo> found, HashSet<long> seenBases)
+    {
+        if (seenBases.Contains(cand)) return;
+        // need room for at least a DOS + PE header before attempting a read
+        if (regionEnd - cand < 0x400) return;
+
+        var img = TryReadPrivateImage(h, (IntPtr)cand, regionEnd - cand);
+        if (img is null) return;
+
+        seenBases.Add(cand);
+        if (!found.Any(f => f.Name == img.Name && f.Size == img.Size))
+            found.Add(img);
     }
 
     /// <summary>Validates a candidate base as a managed PE copy and describes it.</summary>
